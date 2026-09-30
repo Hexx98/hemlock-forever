@@ -375,6 +375,10 @@ function Hemlock:OnInitialize()
 	self:RegisterEvent("MERCHANT_CLOSED");
 	self:RegisterEvent("BAG_UPDATE");
 	self:RegisterEvent("PLAYER_LOGIN");
+	-- Poisons can be learned mid-session, and PLAYER_LOGIN has already run by then. Without
+	-- this the addon stays inert until a reload - which is exactly what a rogue hits the first
+	-- time they train Poisons at 20.
+	self:RegisterEvent("SPELLS_CHANGED");
 	self.frameIndex = 0
 	self.frames = {}
 	self.buyTable = {}
@@ -383,6 +387,14 @@ function Hemlock:OnInitialize()
 	self.buyTable["OnQueue"] = {}
 	self.buyTable["ConfirmationPopup"] = {}
 	self.inited = false
+end
+
+-- Fires whenever the spellbook changes, so it is the hook for learning Poisons mid-session.
+-- Detection is only retried until it succeeds once; after that this does nothing, which
+-- matters because SPELLS_CHANGED fires often.
+function Hemlock:SPELLS_CHANGED()
+	if self.poisonSpellName then return end
+	self:PLAYER_LOGIN()
 end
 
 function Hemlock:PLAYER_LOGIN()
