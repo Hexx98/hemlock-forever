@@ -1,5 +1,5 @@
 ## Interface: 16001
-## Version: 1.0.1-forever
+## Version: 1.1.0-forever
 ## Title: Hemlock Forever
 ## Notes: Minimalistic addon to automate poison buying and creation, for WoW Forever
 ## Author: Antiarc, Grome (original). WoW Forever port by Hexx.

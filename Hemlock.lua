@@ -359,7 +359,9 @@ function Hemlock:InitializeDB()
 	self.db.defaults.profile.options.buyConfirmation = true
 	self.db.defaults.profile.options.alternativeWoundPoisonIcon = false
 	self.db.defaults.profile.options.alternativeCripplingPoisonIcon = false
-	self.db.defaults.profile.options.ignoreLowerRankPoisons = false
+	-- On by default: a stack of Instant Poison I from levelling shouldn't stop Hemlock
+	-- making Instant Poison II. Turn it off to count every rank towards your threshold.
+	self.db.defaults.profile.options.ignoreLowerRankPoisons = true
 end
 
 function Hemlock:OnInitialize()
@@ -530,6 +532,12 @@ function Hemlock:MakeFrame(itemID, space, lastFrame, frameType)
 				GameTooltip:SetOwner(UIParent,"ANCHOR_NONE");
 				GameTooltip:SetPoint("LEFT", "HemlockPoisonButton" .. itemID, "RIGHT",3, 0);
 				GameTooltip:SetText(f.tooltipText, 1, 1, 1);
+				-- which rank this will actually make: the buy window doesn't say, and the
+				-- recipes are unreadable unless the Poisons window happens to be open
+				local rankName = self:GetCachedRank(itemName)
+				if rankName and rankName ~= itemName then
+					GameTooltip:AddLine(self:L("makesrank", rankName), 0.6, 0.85, 1);
+				end
 				GameTooltip:AddLine (self:L("clicktobuy"));
 				if Hemlock.db.profile.options.smartPoisonCount then
 					GameTooltip:AddLine (self:L("clicktosetsmart",itemName,self.db.profile.poisonRequirements[itemName],self:GetPoisonsInInventory(itemName)));
@@ -994,39 +1002,35 @@ function Hemlock:BAG_UPDATE(bag_id)
 end
 
 function Hemlock:GetPoisonsInInventory(name)
-	-- Ignore poisons in inventory that are not the highest rank, this doesn't work well... (yet)
 	self.ignoreLowerRanks = Hemlock.db.profile.options.ignoreLowerRankPoisons
-	if not self.ignoreLowerRanks then
-		local totalCount = 0
-		local rankStrings = {" X", " IX", " VIII", " VII", " VI", " V", " IV", " III", " II", " I", "I", ""}
-		for idx, str in ipairs(rankStrings) do
-			itemName = name .. str
-			count = GetItemCount(itemName)  or 0
-			totalCount = totalCount + count
-		end
-		if totalCount > 0 then
-			return totalCount
-		else
-			return 0
-		end
-	else
-		local rankStrings = {"XX", "XIX", "XVIII", "XVII", "XVI", "XV", "XIV", "XIII", "XII", "XI", "X", "IX", "VIII", "VII", "VI", "V", "IV", "III", "II", "I"}
-		for idx, str in ipairs(rankStrings) do
-			if GetItemCount(name .. " " .. str) > 0 then
-				return GetItemCount(name .. " " .. str)
-			end
-		end
-		if GetItemCount(name) > 0 then
-			return GetItemCount(name)
-		end
-		return 0
+
+	if self.ignoreLowerRanks then
+		-- Count only the rank Hemlock would actually make: the highest one you've LEARNED.
+		-- The old version counted the highest rank found in your BAGS, so a stack of
+		-- Instant Poison I left over from levelling met the threshold and Hemlock refused
+		-- to make Instant Poison II.
+		local rankName = self:GetMaxPoisonRank(name)
+		if rankName then return GetItemCount(rankName) or 0 end
+		-- rank unknown (never had the Poisons window open yet): fall through and count
+		-- everything rather than claim you have none and buy a pile of reagents
 	end
+
+	-- Every rank counts towards the threshold.
+	local totalCount = 0
+	local rankStrings = {" X", " IX", " VIII", " VII", " VI", " V", " IV", " III", " II", " I", "I", ""}
+	for _, suffix in ipairs(rankStrings) do
+		totalCount = totalCount + (GetItemCount(name .. suffix) or 0)
+	end
+	return totalCount
 end
 
 -- Run fn with the Poisons window open and loaded, opening it first if needed.
 -- Classic used a fixed 0.1s delay; recipes here load asynchronously, so poll briefly.
 function Hemlock:WithPoisonsWindow(fn)
-	if PoisonsWindowReady() then return fn() end
+	if PoisonsWindowReady() then
+		pcall(self.RefreshRankCache, self)
+		return fn()
+	end
 	local ok, opened = pcall(C_TradeSkillUI.OpenTradeSkill, POISONS_PROFESSION_ID)
 	if not (ok and opened) then
 		CastSpellByName(self.poisonSpellName)
@@ -1035,6 +1039,7 @@ function Hemlock:WithPoisonsWindow(fn)
 	local function wait()
 		tries = tries + 1
 		if PoisonsWindowReady() then
+			pcall(self.RefreshRankCache, self) -- note each poison's highest rank while we can
 			fn()
 		elseif tries < 30 then
 			C_Timer.After(0.1, wait)
@@ -1045,8 +1050,38 @@ function Hemlock:WithPoisonsWindow(fn)
 	C_Timer.After(0.1, wait)
 end
 
+-- Remember which rank a poison resolved to, so the UI can show it when the Poisons
+-- window is closed - recipes are only readable while that window is open.
+function Hemlock:RememberRank(poisonName, rankName, recipeID)
+	if not (self.db and self.db.profile) then return end
+	self.db.profile.maxRankCache = self.db.profile.maxRankCache or {}
+	self.db.profile.maxRankCache[poisonName] = { name = rankName, id = recipeID }
+end
+
+-- The highest rank we last saw learned, without needing the Poisons window open.
+function Hemlock:GetCachedRank(poisonName)
+	local cache = self.db and self.db.profile and self.db.profile.maxRankCache
+	local entry = cache and cache[poisonName]
+	if entry then return entry.name, entry.id end
+end
+
+-- Re-read every tracked poison's highest rank. Only meaningful while the Poisons window
+-- is open, so it's called right after anything that opens it.
+function Hemlock:RefreshRankCache()
+	if not PoisonsWindowReady() then return end
+	for poisonName in pairs(self.db.profile.poisonRequirements or {}) do
+		self:GetMaxPoisonRank(poisonName) -- caches as a side effect
+	end
+end
+
 -- Returns the name and recipe ID of the highest learned rank of a poison.
 function Hemlock:GetMaxPoisonRank(poisonName)
+	-- With the Poisons window closed there are no recipes to read, so fall back to what
+	-- we saw last time. That's what the buy window's tooltips rely on.
+	if not PoisonsWindowReady() then
+		local cachedName, cachedID = self:GetCachedRank(poisonName)
+		if cachedName then return cachedName, cachedID end
+	end
 	local ranks = {}
 	local pattern = gsub(poisonName, "%-", "%%-") -- "Mind-numbing" must not act as a pattern
 	for _, recipeID in ipairs(C_TradeSkillUI.GetAllRecipeIDs()) do
@@ -1060,11 +1095,13 @@ function Hemlock:GetMaxPoisonRank(poisonName)
 	for idx, str in ipairs(rankStrings) do
 		for k, v in ipairs(ranks) do
 			if v[1] == poisonName .. " " .. str then
+				self:RememberRank(poisonName, v[1], v[2])
 				return v[1], v[2]
 			end
 		end
 	end
 	if not ranks[1] then return end -- recipe not learned; bail gracefully instead of erroring
+	self:RememberRank(poisonName, ranks[1][1], ranks[1][2])
 	return ranks[1][1], ranks[1][2]
 end
 
